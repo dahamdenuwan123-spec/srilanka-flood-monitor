@@ -1,0 +1,146 @@
+import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+# --- CONFIGURATION ---
+# Official URLs (Note: These can change, requiring maintenance)
+IRRIGATION_URL = "http://floodms.navy.lk/wlrs/index.php"  # Often cleaner data than main dept site
+MET_DEPT_URL = "http://www.meteo.gov.lk/index.php?option=com_content&view=article&id=102&Itemid=361&lang=en"
+
+# District Mapping (Gauge Station -> District)
+STATION_MAP = {
+    "Nagalagam Street": "Colombo",
+    "Hanwella": "Colombo",
+    "Glencourse": "Ratnapura",
+    "Ratnapura": "Ratnapura",
+    "Baddegama": "Galle",
+    "Panadugama": "Matara",
+    "Thalgahagoda": "Matara/Galle",
+    "Dunmale": "Gampaha",
+    "Ellagwa": "Ratnapura"
+}
+
+# --- MODULE 1: WEATHER ALERTS SCRAPER ---
+def get_weather_alerts():
+    try:
+        # Note: The Met Dept site is often slow or uses IFrames. 
+        # For a production app, you might need Selenium. 
+        # Here we attempt a direct request.
+        response = requests.get(MET_DEPT_URL, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # This is a generic target for the content area
+        warnings = []
+        content_div = soup.find('div', class_='item-page')
+        if content_div:
+            paragraphs = content_div.find_all('p')
+            for p in paragraphs:
+                text = p.get_text().strip()
+                if len(text) > 20:  # Filter out empty lines
+                    warnings.append(text)
+        
+        return warnings if warnings else ["No special weather warnings found on the official page."]
+    except Exception as e:
+        return [f"Error fetching weather data: {str(e)}"]
+
+# --- MODULE 2: FLOOD LEVEL SCRAPER ---
+def get_flood_data():
+    try:
+        # We scrape the table from the Navy/Irrigation portal
+        # Pandas can read HTML tables directly
+        dfs = pd.read_html(IRRIGATION_URL)
+        
+        # Usually the first table contains the relevant gauge data
+        if dfs:
+            df = dfs[0]
+            # Clean up the dataframe (The structure depends on the website's daily format)
+            # Let's try to standardize column names based on common keywords
+            df.columns = [c.lower() for c in df.columns]
+            
+            # Identify columns for Station, Level, Alert Level, Major Flood Level
+            # This is heuristic based on current site structure
+            return df
+        return None
+    except Exception as e:
+        st.error(f"Error fetching flood data: {str(e)}")
+        return None
+
+# --- MODULE 3: ALERT LOGIC ---
+def process_flood_alerts(df):
+    alerts = []
+    
+    # Iterate through rows to find dangerous levels
+    # Note: Real implementation requires strict column mapping. 
+    # Here we simulate the logic assuming standard columns exist.
+    
+    if df is not None:
+        # Let's look for columns that likely contain the data
+        station_col = next((c for c in df.columns if 'station' in c or 'location' in c), None)
+        level_col = next((c for c in df.columns if 'water' in c and 'level' in c), None)
+        alert_col = next((c for c in df.columns if 'alert' in c), None)
+        
+        if station_col and level_col and alert_col:
+            for index, row in df.iterrows():
+                station = str(row[station_col])
+                try:
+                    current_level = float(row[level_col])
+                    alert_limit = float(row[alert_col])
+                    
+                    # Check if mapped to a district
+                    district = STATION_MAP.get(station, "Unknown District")
+                    
+                    status = "Normal"
+                    color = "green"
+                    
+                    if current_level >= alert_limit:
+                        status = "ALERT"
+                        color = "red"
+                        alerts.append({
+                            "District": district,
+                            "Station": station,
+                            "Level": current_level,
+                            "Threshold": alert_limit,
+                            "Message": f"Flooding Risk in {district}"
+                        })
+                except ValueError:
+                    continue # Skip rows with non-numeric data
+                    
+    return alerts
+
+# --- FRONTEND (STREAMLIT) ---
+st.set_page_config(page_title="Sri Lanka Flood Monitor", layout="wide")
+
+st.title("🇱🇰 Sri Lanka Flood & Weather Monitor")
+st.markdown("Real-time dashboard using data from **Irrigation Dept** and **Met Dept**.")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("🌊 Flood Monitoring")
+    if st.button("Refresh Flood Data"):
+        data = get_flood_data()
+        if data is not None:
+            # Show raw data for transparency
+            st.dataframe(data, use_container_width=True)
+            
+            # Process Alerts
+            alerts = process_flood_alerts(data)
+            
+            st.subheader("⚠️ Active Flood Warnings")
+            if alerts:
+                for alert in alerts:
+                    st.error(f"**{alert['District']}** ({alert['Station']}): Current Level {alert['Level']}m (Alert > {alert['Threshold']}m)")
+            else:
+                st.success("No river stations are currently reporting above Alert Levels.")
+        else:
+            st.warning("Could not load flood data. The source website might be down.")
+
+with col2:
+    st.header("cloud_with_lightning: Weather Alerts")
+    weather_info = get_weather_alerts()
+    for info in weather_info:
+        st.info(info)
+
+st.markdown("---")
+st.caption("Data Disclaimer: This tool scrapes public data from `floodms.navy.lk` and `meteo.gov.lk`. It is for informational purposes only. Always rely on official radio/TV broadcasts for evacuation orders.")
